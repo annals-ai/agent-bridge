@@ -1,0 +1,26 @@
+{
+  "name": "@skills-hot/agent-bridge",
+  "version": "0.1.0",
+  "description": "CLI bridge connecting local AI agents to the Skills.Hot platform",
+  "type": "module",
+  "bin": {
+    "agent-bridge": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch"
+  },
+  "dependencies": {
+    "@skills-hot/bridge-protocol": "workspace:*",
+    "commander": "^13.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0"
+  },
+  "files": ["dist"],
+  "license": "MIT"
+}
