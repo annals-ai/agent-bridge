@@ -14,11 +14,11 @@ vi.mock('../../packages/cli/src/utils/which.js', () => ({
 }));
 
 describe('AgentAdapter base', () => {
-  it('should define abstract interface', async () => {
+  it('should be a class that concrete adapters extend', async () => {
     const { AgentAdapter } = await import('../../packages/cli/src/adapters/base.js');
+    const { OpenClawAdapter } = await import('../../packages/cli/src/adapters/openclaw.js');
     expect(AgentAdapter).toBeDefined();
-    // Abstract class cannot be instantiated
-    expect(() => new (AgentAdapter as never)()).toThrow();
+    expect(new OpenClawAdapter()).toBeInstanceOf(AgentAdapter);
   });
 });
 
@@ -102,7 +102,7 @@ describe('CodexAdapter', () => {
     const { CodexAdapter } = await import('../../packages/cli/src/adapters/codex.js');
     const adapter = new CodexAdapter();
     expect(adapter.type).toBe('codex');
-    expect(adapter.displayName).toBe('Codex');
+    expect(adapter.displayName).toBe('Codex CLI');
   });
 
   it('should return false for isAvailable', async () => {

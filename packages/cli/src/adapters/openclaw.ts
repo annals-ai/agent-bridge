@@ -78,7 +78,10 @@ class OpenClawSession implements SessionHandle {
     this.sessionKey = `bridge:${sessionId}`;
   }
 
-  send(message: string): void {
+  send(message: string, _attachments?: { name: string; url: string; type: string }[]): void {
+    // Note: OpenClaw Gateway does not support attachments natively.
+    // Attachments are silently ignored for now.
+
     // If we already have a connected WS, reuse it to send
     if (this.ws && this.ws.readyState === WebSocket.OPEN && this.isConnected) {
       this.sendAgentRequest(message);
@@ -245,7 +248,11 @@ class OpenClawSession implements SessionHandle {
         idempotencyKey: `idem-${Date.now()}-${randomUUID().slice(0, 8)}`,
       },
     };
-    this.ws!.send(JSON.stringify(req));
+    try {
+      this.ws!.send(JSON.stringify(req));
+    } catch (err) {
+      this.emitError(new Error(`Failed to send to OpenClaw: ${err}`));
+    }
   }
 
   private emitError(err: Error): void {

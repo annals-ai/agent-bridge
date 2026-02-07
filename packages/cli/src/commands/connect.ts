@@ -71,7 +71,11 @@ export function registerConnectCommand(program: Command): void {
       log.info(`Checking ${adapter.displayName} availability...`);
       const available = await adapter.isAvailable();
       if (!available) {
-        log.error(`${adapter.displayName} is not available. Make sure it is installed and running.`);
+        if (type === 'codex' || type === 'gemini') {
+          log.error(`${adapter.displayName} adapter is not yet implemented. Supported adapters: openclaw, claude`);
+        } else {
+          log.error(`${adapter.displayName} is not available. Make sure it is installed and running.`);
+        }
         process.exit(1);
       }
       log.success(`${adapter.displayName} is available`);
@@ -114,8 +118,9 @@ export function registerConnectCommand(program: Command): void {
       process.on('SIGINT', shutdown);
       process.on('SIGTERM', shutdown);
 
-      // Reconnect handler
+      // Reconnect handler — clean up stale sessions before restarting
       wsClient.on('reconnect', () => {
+        manager.stop();
         manager.start();
       });
     });

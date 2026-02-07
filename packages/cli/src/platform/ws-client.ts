@@ -43,7 +43,10 @@ export class BridgeWSClient extends EventEmitter {
       this.registered = false;
 
       try {
-        this.ws = new WebSocket(this.opts.url);
+        // Append agent_id as query parameter (required by Durable Object routing)
+        const wsUrl = new URL(this.opts.url);
+        wsUrl.searchParams.set('agent_id', this.opts.agentId);
+        this.ws = new WebSocket(wsUrl.toString());
       } catch (err) {
         reject(new Error(`Failed to create WebSocket: ${err}`));
         return;
@@ -174,6 +177,11 @@ export class BridgeWSClient extends EventEmitter {
     if (this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
+      // Ensure old WebSocket is cleaned up before reconnecting
+      if (this.ws) {
+        try { this.ws.close(); } catch {}
+        this.ws = null;
+      }
       try {
         log.info('Attempting reconnect...');
         await this.connect();

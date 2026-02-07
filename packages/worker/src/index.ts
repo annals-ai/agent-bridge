@@ -2,166 +2,123 @@
  * Bridge Worker — Cloudflare Worker entry point.
  *
  * Routes:
- *   GET  /ws                    → WebSocket upgrade (agent-bridge CLI connections)
- *   GET  /health                → Health check
- *   GET  /api/agents/:id/status → Check if agent is online
- *   POST /api/relay             → Relay message to agent, return SSE stream
+ *   GET  /ws?agent_id=<id>        → WebSocket upgrade → Durable Object
+ *   GET  /health                   → Health check
+ *   GET  /api/agents/:id/status    → Agent online status (via DO)
+ *   POST /api/relay                → Relay message to agent (via DO)
+ *
+ * Architecture:
+ *   Each agent gets a Durable Object (AgentSession) keyed by agent_id.
+ *   The DO holds the WebSocket and handles relay in the same instance.
  */
 
-import type { RelayRequest } from '@skills-hot/bridge-protocol';
-import { handleWebSocket, type Env } from './ws-handler.js';
-import * as registry from './registry.js';
-import { handleRelayRequest, agentConnections } from './relay.js';
+export { AgentSession } from './agent-session.js';
+
+interface Env {
+  AGENT_SESSIONS: DurableObjectNamespace;
+  BRIDGE_KV: KVNamespace;
+  SUPABASE_URL: string;
+  SUPABASE_SERVICE_KEY: string;
+  PLATFORM_SECRET: string;
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // CORS headers for API endpoints
+    // CORS preflight
     if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        headers: corsHeaders(),
-      });
+      return new Response(null, { headers: corsHeaders() });
     }
 
-    // WebSocket upgrade
-    if (path === '/ws') {
-      const upgradeHeader = request.headers.get('Upgrade');
-      if (upgradeHeader !== 'websocket') {
-        return jsonResponse(426, { error: 'Expected WebSocket upgrade' });
-      }
-      return handleWebSocket(env);
-    }
-
-    // Health check
+    // Health check (no auth)
     if (path === '/health' && request.method === 'GET') {
-      return jsonResponse(200, {
-        status: 'ok',
-        connected_agents: agentConnections.size,
-      });
+      return jsonResponse(200, { status: 'ok' });
     }
 
-    // All other API routes require platform auth
+    // WebSocket upgrade — route to Durable Object
+    if (path === '/ws') {
+      const agentId = url.searchParams.get('agent_id');
+      if (!agentId) {
+        return jsonResponse(400, { error: 'missing_agent_id', message: 'WebSocket URL must include ?agent_id=<uuid>' });
+      }
+      if (!isValidAgentId(agentId)) {
+        return jsonResponse(400, { error: 'invalid_agent_id', message: 'agent_id must be a valid UUID' });
+      }
+
+      const id = env.AGENT_SESSIONS.idFromName(agentId);
+      const stub = env.AGENT_SESSIONS.get(id);
+      return stub.fetch(new Request(`${url.origin}/ws`, {
+        headers: request.headers,
+      }));
+    }
+
+    // All API routes require platform auth
     if (!authenticatePlatform(request, env)) {
       return jsonResponse(401, { error: 'auth_failed', message: 'Invalid or missing X-Platform-Secret' });
     }
 
-    // Agent status
+    // Agent status — route to Durable Object
     const statusMatch = path.match(/^\/api\/agents\/([^/]+)\/status$/);
     if (statusMatch && request.method === 'GET') {
       const agentId = statusMatch[1];
-      const reg = await registry.get(env.BRIDGE_KV, agentId);
-      if (!reg) {
-        return jsonResponse(200, { online: false });
+      if (!isValidAgentId(agentId)) {
+        return jsonResponse(400, { error: 'invalid_agent_id', message: 'agent_id must be a valid UUID' });
       }
-      return jsonResponse(200, {
-        online: true,
-        agent_type: reg.agent_type,
-        capabilities: reg.capabilities,
-        connected_at: reg.connected_at,
-        last_heartbeat: reg.last_heartbeat,
-        active_sessions: reg.active_sessions,
-      });
+      const id = env.AGENT_SESSIONS.idFromName(agentId);
+      const stub = env.AGENT_SESSIONS.get(id);
+      return stub.fetch(new Request(`${url.origin}/status`));
     }
 
-    // Relay message to agent
+    // Relay — route to Durable Object
     if (path === '/api/relay' && request.method === 'POST') {
-      let body: RelayRequest;
+      let body: { agent_id?: string };
       try {
-        body = await request.json() as RelayRequest;
+        body = await request.clone().json() as typeof body;
       } catch {
         return jsonResponse(400, { error: 'invalid_message', message: 'Invalid JSON body' });
       }
 
-      if (!body.agent_id || !body.session_id || !body.request_id || !body.content) {
-        return jsonResponse(400, {
-          error: 'invalid_message',
-          message: 'Missing required fields: agent_id, session_id, request_id, content',
-        });
+      if (!body.agent_id) {
+        return jsonResponse(400, { error: 'invalid_message', message: 'Missing agent_id' });
+      }
+      if (!isValidAgentId(body.agent_id)) {
+        return jsonResponse(400, { error: 'invalid_agent_id', message: 'agent_id must be a valid UUID' });
       }
 
-      // Check agent is connected in this worker instance
-      if (!agentConnections.has(body.agent_id)) {
-        // Check KV to see if agent is online on another instance
-        const reg = await registry.get(env.BRIDGE_KV, body.agent_id);
-        if (reg) {
-          return jsonResponse(502, {
-            error: 'agent_busy',
-            message: 'Agent is connected to a different worker instance',
-          });
-        }
-        return jsonResponse(404, {
-          error: 'agent_offline',
-          message: 'Agent is not connected',
-        });
-      }
-
-      const stream = handleRelayRequest(
-        body.agent_id,
-        body.session_id,
-        body.request_id,
-        body.content,
-        body.attachments ?? [],
-      );
-
-      if (!stream) {
-        return jsonResponse(502, {
-          error: 'agent_offline',
-          message: 'Failed to send message to agent',
-        });
-      }
-
-      // Return SSE stream — pipe string chunks to encoded bytes
-      const encoder = new TextEncoder();
-      const readable = new ReadableStream({
-        async start(controller) {
-          const reader = stream.getReader();
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              controller.enqueue(encoder.encode(value));
-            }
-          } catch {
-            // Stream error
-          } finally {
-            controller.close();
-          }
-        },
-      });
-
-      return new Response(readable, {
-        headers: {
-          ...corsHeaders(),
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          'Connection': 'keep-alive',
-        },
-      });
+      const id = env.AGENT_SESSIONS.idFromName(body.agent_id);
+      const stub = env.AGENT_SESSIONS.get(id);
+      return stub.fetch(new Request(`${url.origin}/relay`, {
+        method: 'POST',
+        headers: request.headers,
+        body: request.body,
+      }));
     }
 
     return jsonResponse(404, { error: 'not_found', message: 'Route not found' });
   },
 } satisfies ExportedHandler<Env>;
 
-// ============================================================
-// Helpers
-// ============================================================
-
 function authenticatePlatform(request: Request, env: Env): boolean {
   const secret = request.headers.get('X-Platform-Secret');
-  return !!secret && secret === env.PLATFORM_SECRET;
+  if (!secret || !env.PLATFORM_SECRET || secret.length === 0 || env.PLATFORM_SECRET.length === 0) {
+    return false;
+  }
+  return secret === env.PLATFORM_SECRET;
 }
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: {
-      ...corsHeaders(),
-      'Content-Type': 'application/json',
-    },
+    headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
   });
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidAgentId(id: string): boolean {
+  return UUID_RE.test(id);
 }
 
 function corsHeaders(): Record<string, string> {

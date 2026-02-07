@@ -30,7 +30,9 @@ class ClaudeSession implements SessionHandle {
     this.config = config;
   }
 
-  send(message: string): void {
+  send(message: string, _attachments?: { name: string; url: string; type: string }[]): void {
+    // Note: Claude Code CLI does not support file attachments via stdin.
+    // Attachments are silently ignored for now.
     this.resetIdleTimer();
 
     // Spawn a new claude process for each message
